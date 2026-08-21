@@ -1,0 +1,13 @@
+{
+  "default": "xyz",
+  "projects": {
+    "xyz": {
+      "path": "/home/dernet/repos/xyz",
+      "description": "The main project everyone is working on"
+    },
+    "other-thing": {
+      "path": "/home/dernet/repos/other-thing",
+      "description": "Side project"
+    }
+  }
+}
