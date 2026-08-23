@@ -64,6 +64,11 @@ function sharePayload() {
           description: "Anyone may use your sub when theirs is missing or rate-limited",
         },
         {
+          label: "Everyone — public channels only",
+          value: "everyone_public",
+          description: "Same, but only where @everyone can see, so usage stays visible to you",
+        },
+        {
           label: "Specific people (choose later)",
           value: "specific",
           description: "Start private; grant people with /share @user in the server",
@@ -104,8 +109,11 @@ function policyPayload() {
 
 function summaryPayload(userId: string): { content: string; components: [] } {
   const shares = listSharesByOwner(userId);
-  const sharing = shares.includes("*")
-    ? "everyone on the server"
+  const everyone = shares.find((s) => s.grantee === "*");
+  const sharing = everyone
+    ? everyone.publicOnly
+      ? "everyone on the server (public channels only)"
+      : "everyone on the server"
     : shares.length
       ? `${shares.length} specific ${shares.length === 1 ? "person" : "people"}`
       : "only you";
@@ -187,7 +195,8 @@ export async function handleTokenModal(interaction: ModalSubmitInteraction): Pro
 export async function handleSelect(interaction: StringSelectMenuInteraction): Promise<void> {
   const choice = interaction.values[0] ?? "";
   if (interaction.customId === "wiz:share") {
-    if (choice === "everyone") addShare(interaction.user.id, "*");
+    if (choice === "everyone") addShare(interaction.user.id, "*", false);
+    else if (choice === "everyone_public") addShare(interaction.user.id, "*", true);
     else removeShare(interaction.user.id, "*");
     return void (await interaction.update(policyPayload()));
   }

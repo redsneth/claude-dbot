@@ -10,13 +10,17 @@ Built on [discord.js](https://discord.js.org) and the
 
 ## Features
 
-- **`/ask`** or **@mention the bot** — ask Claude; mentions include recent channel history as context.
+- **`/ask`** or **@mention the bot** — ask Claude; mentions include recent channel history as context,
+  and @mentioning **as a reply** pulls in the replied-to message ±5 surrounding messages, so
+  "why is he wrong?" knows exactly which message "he" and "wrong" refer to.
   `/ask` takes an optional `model` (Haiku/Sonnet/Opus/Fable); the host sets the default via `DBOT_DEFAULT_MODEL`
 - **`/setup`** — guided onboarding in your DMs: one message walks you through token → sharing →
   model cap with buttons and dropdowns, ending in a summary
 - **`/register`** — the quick path: paste your token from `claude setup-token` into a private modal
   (stored AES-256-GCM encrypted)
-- **`/share` / `/unshare`** — let a specific person, or everyone, use your subscription through the bot
+- **`/share` / `/unshare`** — let a specific person, or everyone, use your subscription through the bot.
+  Optional `public_only` flag restricts a share to channels visible to @everyone, so donors can
+  watch how their sub gets used (threads inherit their parent channel's visibility)
 - **`/status`** — your token state, cooldowns, window utilization, who shares with you
 - **`/policy`** — cap which models *others* may run on your shared sub (e.g. "up to Sonnet";
   your own asks are never capped). The router skips your sub when someone requests a bigger model
@@ -24,6 +28,18 @@ Built on [discord.js](https://discord.js.org) and the
   your sub, broken down by user and model, plus the live rate-limit-window utilization %
 - **`/project`** — point a channel at a repo checkout (from `projects.json`) so Claude can read the code
 - **`/reset`** — clear a channel's Claude conversation memory
+- **`/remember` / `/forget`** — teach the bot facts about yourself (preferred name, what you work
+  on; max 10 notes, self-reported only) that flavor its answers to you everywhere
+- **`persona.md`** — the bot's voice, verbosity, and addressing style live in a host-editable
+  file (copy `persona.example.md`), re-read on every question so edits apply instantly
+- **Always-on skills** — any `bot-plugin/skills/<name>/SKILL.md` is inlined into the system
+  prompt of every answer (guaranteed to apply, unlike opt-in Claude Code skills), whatever the
+  project, hot-reloaded per question. Unlicensed third-party skills (e.g. cursor/plugins'
+  `unslop`) aren't vendored — run `npm run fetch-skills` once per host to download them
+- **Bot-to-bot discussions** — allowlist other bots via `DBOT_PEER_BOTS` (comma-separated user IDs,
+  set on both sides) and they can @mention each other into a conversation; a per-channel chain cap
+  (`DBOT_MAX_BOT_CHAIN`, default 4) stops runaway loops until a human speaks again. Note: a peer
+  bot has no token of its own, so its questions ride subs shared with *everyone*
 - Per-channel resumable sessions, automatic rate-limit failover with reset-time cooldowns,
   answers chunked to Discord's 2000-char limit with code fences preserved
 - Claude runs **read-only** (Read/Grep/Glob/WebSearch/WebFetch only — no bash, no file edits)

@@ -47,6 +47,13 @@ db.exec(`
     cost_usd      REAL NOT NULL
   );
   CREATE INDEX IF NOT EXISTS usage_owner_ts ON usage_log (owner_id, ts);
+  -- Self-reported facts users teach the bot about themselves via /remember.
+  CREATE TABLE IF NOT EXISTS user_notes (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    ts      INTEGER NOT NULL,
+    note    TEXT NOT NULL
+  );
   -- Latest rate-limit window snapshot per token, from the SDK's rate_limit_event.
   CREATE TABLE IF NOT EXISTS token_status (
     owner_id    TEXT PRIMARY KEY,
@@ -56,9 +63,14 @@ db.exec(`
   );
 `);
 
-// Migration for databases created before donor model policies existed.
+// Migrations for databases created before these columns existed.
 try {
   db.exec(`ALTER TABLE tokens ADD COLUMN max_tier TEXT NOT NULL DEFAULT 'any'`);
+} catch {
+  // column already exists
+}
+try {
+  db.exec(`ALTER TABLE shares ADD COLUMN public_only INTEGER NOT NULL DEFAULT 0`);
 } catch {
   // column already exists
 }
@@ -162,6 +174,31 @@ export function usageSummary(ownerId: string, sinceMs: number): UsageSummary {
   };
 }
 
+// --- user notes (/remember) ---
+
+const MAX_NOTES_PER_USER = 10;
+
+export function addUserNote(userId: string, note: string): void {
+  db.prepare(`INSERT INTO user_notes (user_id, ts, note) VALUES (?, ?, ?)`).run(userId, Date.now(), note);
+  // Keep only the newest MAX_NOTES_PER_USER notes.
+  db.prepare(
+    `DELETE FROM user_notes WHERE user_id = ? AND id NOT IN
+     (SELECT id FROM user_notes WHERE user_id = ? ORDER BY ts DESC, id DESC LIMIT ?)`,
+  ).run(userId, userId, MAX_NOTES_PER_USER);
+}
+
+export function getUserNotes(userId: string): string[] {
+  return (
+    db.prepare(`SELECT note FROM user_notes WHERE user_id = ? ORDER BY ts ASC, id ASC`).all(userId) as {
+      note: string;
+    }[]
+  ).map((r) => r.note);
+}
+
+export function clearUserNotes(userId: string): void {
+  db.prepare(`DELETE FROM user_notes WHERE user_id = ?`).run(userId);
+}
+
 export function setTokenStatus(ownerId: string, utilization: number | undefined, limitType: string | undefined): void {
   db.prepare(
     `INSERT INTO token_status (owner_id, utilization, limit_type, updated_at) VALUES (?, ?, ?, ?)
@@ -181,31 +218,41 @@ export function getTokenStatus(
 
 // --- shares ---
 
-export function addShare(ownerId: string, grantee: string): void {
-  db.prepare(`INSERT OR IGNORE INTO shares (owner_id, grantee) VALUES (?, ?)`).run(ownerId, grantee);
+export function addShare(ownerId: string, grantee: string, publicOnly = false): void {
+  db.prepare(
+    `INSERT INTO shares (owner_id, grantee, public_only) VALUES (?, ?, ?)
+     ON CONFLICT(owner_id, grantee) DO UPDATE SET public_only = excluded.public_only`,
+  ).run(ownerId, grantee, publicOnly ? 1 : 0);
 }
 
 export function removeShare(ownerId: string, grantee: string): void {
   db.prepare(`DELETE FROM shares WHERE owner_id = ? AND grantee = ?`).run(ownerId, grantee);
 }
 
-export function listSharesByOwner(ownerId: string): string[] {
-  return (db.prepare(`SELECT grantee FROM shares WHERE owner_id = ?`).all(ownerId) as { grantee: string }[]).map(
-    (r) => r.grantee,
-  );
+export function listSharesByOwner(ownerId: string): { grantee: string; publicOnly: boolean }[] {
+  return (
+    db.prepare(`SELECT grantee, public_only FROM shares WHERE owner_id = ?`).all(ownerId) as {
+      grantee: string;
+      public_only: number;
+    }[]
+  ).map((r) => ({ grantee: r.grantee, publicOnly: r.public_only === 1 }));
 }
 
-/** Token owners who have shared with this user (directly or with everyone), excluding the user. */
-export function donorsFor(userId: string): string[] {
+/**
+ * Token owners who have shared with this user (directly or with everyone), excluding the user.
+ * Shares marked public-only are excluded unless the invoking channel is publicly visible.
+ */
+export function donorsFor(userId: string, inPublicChannel: boolean): string[] {
   return (
     db
       .prepare(
         `SELECT s.owner_id FROM shares s
          JOIN tokens t ON t.owner_id = s.owner_id
          WHERE (s.grantee = ? OR s.grantee = '*') AND s.owner_id != ?
+           AND (s.public_only = 0 OR ? = 1)
          ORDER BY t.last_used ASC`,
       )
-      .all(userId, userId) as { owner_id: string }[]
+      .all(userId, userId, inPublicChannel ? 1 : 0) as { owner_id: string }[]
   ).map((r) => r.owner_id);
 }
 

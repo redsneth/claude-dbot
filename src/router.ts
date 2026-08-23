@@ -14,10 +14,10 @@ export interface Candidate {
  * model policy (max tier) doesn't allow the requested model. A user's own
  * token is never policy-filtered — the policy governs what *others* may run.
  */
-export function candidatesFor(userId: string, model?: ModelKey): Candidate[] {
+export function candidatesFor(userId: string, model?: ModelKey, inPublicChannel = false): Candidate[] {
   const out: Candidate[] = [];
   if (hasToken(userId) && !getCooldown(userId)) out.push({ ownerId: userId, isOwn: true });
-  for (const ownerId of donorsFor(userId)) {
+  for (const ownerId of donorsFor(userId, inPublicChannel)) {
     if (getCooldown(ownerId)) continue;
     if (model && !policyAllows(getMaxTier(ownerId), model)) continue;
     out.push({ ownerId, isOwn: false });
@@ -35,8 +35,8 @@ export function applySubPreference(candidates: Candidate[], pref: SubPreference)
 }
 
 /** Earliest cooldown expiry among the user's tokens, for "try again at …" messages. */
-export function earliestReset(userId: string): number | undefined {
-  const owners = [userId, ...donorsFor(userId)];
+export function earliestReset(userId: string, inPublicChannel = false): number | undefined {
+  const owners = [userId, ...donorsFor(userId, inPublicChannel)];
   const times = owners
     .map((o) => getCooldown(o)?.until)
     .filter((t): t is number => t !== undefined);

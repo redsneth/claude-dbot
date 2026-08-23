@@ -43,7 +43,12 @@ export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName("share")
     .setDescription("Let someone (or everyone) use your Claude subscription through this bot")
-    .addUserOption((o) => o.setName("user").setDescription("Who to share with (omit to share with everyone)")),
+    .addUserOption((o) => o.setName("user").setDescription("Who to share with (omit to share with everyone)"))
+    .addBooleanOption((o) =>
+      o
+        .setName("public_only")
+        .setDescription("Only allow use in channels visible to everyone, so you can see how your sub is used"),
+    ),
 
   new SlashCommandBuilder()
     .setName("unshare")
@@ -91,4 +96,13 @@ export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName("reset")
     .setDescription("Forget this channel's Claude conversation (start a fresh session)"),
+
+  new SlashCommandBuilder()
+    .setName("remember")
+    .setDescription("Teach the bot a fact about yourself (e.g. how to address you, what you work on)")
+    .addStringOption((o) =>
+      o.setName("note").setDescription("The fact (max 300 chars; you can store up to 10)").setRequired(true).setMaxLength(300),
+    ),
+
+  new SlashCommandBuilder().setName("forget").setDescription("Delete everything the bot remembers about you"),
 ].map((c) => c.toJSON());

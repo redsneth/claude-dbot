@@ -1,0 +1,5 @@
+{
+  "name": "dbot",
+  "version": "0.1.0",
+  "description": "Skills bundled with claude-dbot, loaded into every bot answer regardless of project"
+}

@@ -6,6 +6,7 @@ import {
   getChannelProject,
   getDecryptedToken,
   getSession,
+  getUserNotes,
   logUsage,
   setCooldown,
   setSession,
@@ -22,12 +23,18 @@ export interface AskRequest {
   question: string;
   /** Recent channel messages, oldest first, already formatted as "Author: text" lines. */
   history: string[];
+  /** When the invocation was a Discord reply: the replied-to message and its surroundings. */
+  replyContext?: { target: string; around: string[] };
   /** Explicit project override (else channel default, else global default). */
   project?: string;
   /** Model key (haiku|sonnet|opus|fable); else the host's configured default. */
   model?: string;
   /** Which subscriptions to route to: own first + donated fallback (auto), own only, or donated only. */
   sub?: SubPreference;
+  /** Whether the invoking channel is visible to @everyone (public-only shares require this). */
+  isPublicChannel?: boolean;
+  /** Standing note about allowlisted peer bots and how to address them. */
+  peerNote?: string;
 }
 
 export interface AskOutcome {
@@ -37,15 +44,16 @@ export interface AskOutcome {
   viaDonor?: string;
 }
 
-function resolveProject(channelId: string, override?: string): { name: string; cwd: string } {
+function resolveProject(channelId: string, override?: string): { name: string; cwd: string; hasProject: boolean } {
   const projects = loadProjects();
   const name = override ?? getChannelProject(channelId) ?? projects.default;
-  if (name && projects.projects[name]) {
-    return { name, cwd: projects.projects[name].path };
+  // "none" opts a channel out of the global default project (general chat mode).
+  if (name && name !== "none" && projects.projects[name]) {
+    return { name, cwd: projects.projects[name].path, hasProject: true };
   }
   const scratch = join(config.dataDir, "scratch");
   mkdirSync(scratch, { recursive: true });
-  return { name: "scratch", cwd: scratch };
+  return { name: "none", cwd: scratch, hasProject: false };
 }
 
 // One Claude run per channel at a time, so session resumes don't race.
@@ -67,9 +75,10 @@ function resolveModel(override?: string): ModelKey {
 export async function ask(req: AskRequest): Promise<AskOutcome> {
   const model = resolveModel(req.model);
   const pref: SubPreference = req.sub ?? "auto";
-  const candidates = applySubPreference(candidatesFor(req.userId, model), pref);
+  const isPublic = req.isPublicChannel ?? false;
+  const candidates = applySubPreference(candidatesFor(req.userId, model, isPublic), pref);
   if (candidates.length === 0) {
-    const reset = earliestReset(req.userId);
+    const reset = earliestReset(req.userId, isPublic);
     const when = reset ? ` Rate limits reset around <t:${Math.floor(reset / 1000)}:t>.` : "";
     if (pref === "mine") {
       return {
@@ -85,16 +94,19 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
         text: `No donated subscription available to you allows **${MODELS[model].label}** right now.${when}`,
       };
     }
+    const privateHint = !isPublic
+      ? " Note: this channel isn't visible to everyone, so donors who share **public channels only** don't apply here."
+      : "";
     return {
       ok: false,
       text:
-        `No subscription available to you allows **${MODELS[model].label}** right now.${when}\n` +
+        `No subscription available to you allows **${MODELS[model].label}** right now.${when}${privateHint}\n` +
         `Register your own with **/register** (run \`claude setup-token\` in a terminal to get a token), ` +
         `ask a friend to **/share** theirs, or try a smaller model via the \`model\` option on /ask.`,
     };
   }
 
-  const { name: project, cwd } = resolveProject(req.channelId, req.project);
+  const { name: project, cwd, hasProject } = resolveProject(req.channelId, req.project);
   const existingSession = getSession(req.channelId, project);
 
   // When resuming, the session already has the conversation; only new context is needed.
@@ -102,7 +114,21 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
     !existingSession && req.history.length
       ? `Recent channel messages for context:\n<discord_history>\n${req.history.join("\n")}\n</discord_history>\n\n`
       : "";
-  const prompt = `${historyBlock}${req.userName} asks: ${req.question}`;
+  const notes = getUserNotes(req.userId);
+  const notesBlock = notes.length
+    ? `Self-reported facts about ${req.userName} (they entered these via /remember):\n${notes.map((n) => `- ${n}`).join("\n")}\n\n`
+    : "";
+  // Reply context is question-specific, so it's included even when resuming a session.
+  const replyBlock = req.replyContext
+    ? `${req.userName} is REPLYING TO this specific message — it is the referent of their question:\n` +
+      `>>> ${req.replyContext.target}\n` +
+      (req.replyContext.around.length
+        ? `Conversation around that message (oldest first):\n<reply_context>\n${req.replyContext.around.join("\n")}\n</reply_context>\n`
+        : "") +
+      `\n`
+    : "";
+  const peerBlock = req.peerNote ? `${req.peerNote}\n\n` : "";
+  const prompt = `${historyBlock}${replyBlock}${peerBlock}${notesBlock}${req.userName} asks: ${req.question}`;
 
   const failures: string[] = [];
   for (const candidate of candidates) {
@@ -112,6 +138,7 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
     const result = await runClaude({
       prompt,
       cwd,
+      hasProject,
       oauthToken: token,
       model: MODELS[model].id,
       resumeSessionId: existingSession,
@@ -152,7 +179,7 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
     return { ok: false, text: `Something went wrong: ${truncate(result.text, 500)}` };
   }
 
-  const reset = earliestReset(req.userId);
+  const reset = earliestReset(req.userId, isPublic);
   const when = reset ? ` Try again around <t:${Math.floor(reset / 1000)}:t>.` : "";
   return {
     ok: false,

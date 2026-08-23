@@ -6,6 +6,7 @@ import {
   GatewayIntentBits,
   Message,
   MessageFlags,
+  PermissionFlagsBits,
   ModalBuilder,
   ModalSubmitInteraction,
   TextInputBuilder,
@@ -16,9 +17,12 @@ import { ask, enqueue } from "./ask.js";
 import { chunkMessage } from "./format.js";
 import {
   addShare,
+  addUserNote,
   clearChannelProject,
   clearSessions,
+  clearUserNotes,
   deleteToken,
+  getUserNotes,
   getChannelProject,
   getCooldown,
   getMaxTier,
@@ -41,14 +45,56 @@ const client = new Client({
 
 const HISTORY_LIMIT = 30;
 
-async function fetchHistory(message: Message | null, channelId: string): Promise<string[]> {
+/**
+ * A channel counts as "public" when the @everyone role can view it (threads
+ * inherit from their parent). DMs and unresolvable channels count as private.
+ */
+function isPublicChannel(channel: unknown): boolean {
+  const ch = channel as {
+    isThread?: () => boolean;
+    parent?: unknown;
+    guild?: { roles: { everyone: unknown } };
+    permissionsFor?: (role: unknown) => { has: (p: bigint) => boolean } | null;
+  } | null;
+  if (!ch?.guild) return false;
+  if (typeof ch.isThread === "function" && ch.isThread()) return isPublicChannel(ch.parent);
+  if (typeof ch.permissionsFor !== "function") return false;
+  return ch.permissionsFor(ch.guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel) ?? false;
+}
+
+function formatMsg(m: Message): string {
+  return `${m.member?.displayName ?? m.author.displayName ?? m.author.username}: ${m.cleanContent}`;
+}
+
+async function fetchHistory(message: Message | null, channelId: string, excludeIds?: Set<string>): Promise<string[]> {
   const channel = message?.channel ?? (await client.channels.fetch(channelId));
   if (!channel || !("messages" in channel)) return [];
   const fetched = await channel.messages.fetch({ limit: HISTORY_LIMIT });
   return [...fetched.values()]
     .reverse()
-    .filter((m) => m.content.trim().length > 0)
-    .map((m) => `${m.member?.displayName ?? m.author.displayName ?? m.author.username}: ${m.cleanContent}`);
+    .filter((m) => m.content.trim().length > 0 && !excludeIds?.has(m.id))
+    .map(formatMsg);
+}
+
+/**
+ * When the invoking message is a Discord reply, resolve the replied-to message
+ * plus ~5 messages either side of it, so "why is he wrong?" has a referent.
+ */
+async function getReplyContext(
+  message: Message,
+): Promise<{ target: string; around: string[]; ids: Set<string> } | undefined> {
+  if (!message.reference?.messageId) return undefined;
+  try {
+    const target = await message.fetchReference();
+    const around = await message.channel.messages.fetch({ around: target.id, limit: 11 });
+    const sorted = [...around.values()]
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+      .filter((m) => m.content.trim().length > 0 && m.id !== message.id);
+    return { target: formatMsg(target), around: sorted.map(formatMsg), ids: new Set(around.keys()) };
+  } catch (err) {
+    console.error("Could not fetch reply context:", err);
+    return undefined;
+  }
 }
 
 async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -57,24 +103,28 @@ async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void
   const model = interaction.options.getString("model") ?? undefined;
   const sub = (interaction.options.getString("sub") ?? undefined) as "auto" | "mine" | "donated" | undefined;
 
+  const askerName =
+    interaction.member && "displayName" in interaction.member
+      ? interaction.member.displayName
+      : interaction.user.username;
+
   await interaction.deferReply();
   const outcome = await enqueue(interaction.channelId, () =>
     ask({
       userId: interaction.user.id,
-      userName: interaction.member && "displayName" in interaction.member
-        ? interaction.member.displayName
-        : interaction.user.username,
+      userName: askerName,
       channelId: interaction.channelId,
       question,
       history: [],
       project,
       model,
       sub,
+      isPublicChannel: isPublicChannel(interaction.channel),
     }),
   );
 
   const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
-  const chunks = chunkMessage(`**Q (${interaction.user.displayName}):** ${question}\n\n${outcome.text}${suffix}`);
+  const chunks = chunkMessage(`**Q (${askerName}):** ${question}\n\n${outcome.text}${suffix}`);
   await interaction.editReply(chunks[0] ?? "(empty response)");
   for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
 }
@@ -140,11 +190,13 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         }));
       }
       const user = interaction.options.getUser("user");
-      addShare(interaction.user.id, user ? user.id : "*");
+      const publicOnly = interaction.options.getBoolean("public_only") ?? false;
+      addShare(interaction.user.id, user ? user.id : "*", publicOnly);
+      const scope = publicOnly ? " (usable in **public channels only**)" : "";
       return void (await interaction.reply(
         user
-          ? `${interaction.user.displayName} shared their Claude sub with ${user}. Revoke anytime with /unshare.`
-          : `${interaction.user.displayName} shared their Claude sub with **everyone** here. Revoke anytime with /unshare.`,
+          ? `${interaction.user.displayName} shared their Claude sub with ${user}${scope}. Revoke anytime with /unshare.`
+          : `${interaction.user.displayName} shared their Claude sub with **everyone** here${scope}. Revoke anytime with /unshare.`,
       ));
     }
 
@@ -182,18 +234,24 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         );
         const shares = listSharesByOwner(uid);
         if (shares.length)
-          lines.push(`You share with: ${shares.map((s) => (s === "*" ? "everyone" : `<@${s}>`)).join(", ")}`);
+          lines.push(
+            `You share with: ${shares
+              .map((s) => (s.grantee === "*" ? "everyone" : `<@${s.grantee}>`) + (s.publicOnly ? " (public channels only)" : ""))
+              .join(", ")}`,
+          );
       } else {
         lines.push("Your token: none (use /register)");
       }
-      const donors = candidatesFor(uid).filter((c) => !c.isOwn);
+      const donors = candidatesFor(uid, undefined, isPublicChannel(interaction.channel)).filter((c) => !c.isOwn);
       lines.push(
         donors.length
           ? `Usable donated subs: ${donors.map((d) => `<@${d.ownerId}>`).join(", ")}`
           : "Usable donated subs: none",
       );
-      const project = getChannelProject(interaction.channelId) ?? loadProjects().default ?? "scratch (none configured)";
-      lines.push(`This channel's project: **${project}**`);
+      const project = getChannelProject(interaction.channelId) ?? loadProjects().default ?? "none";
+      lines.push(`This channel's project: **${project === "none" ? "none (general chat)" : project}**`);
+      const noteCount = getUserNotes(uid).length;
+      if (noteCount) lines.push(`The bot remembers ${noteCount} thing${noteCount === 1 ? "" : "s"} about you (/remember to review, /forget to wipe)`);
       return void (await interaction.reply({ content: lines.join("\n"), flags: MessageFlags.Ephemeral }));
     }
 
@@ -254,7 +312,8 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         const body = entries.length
           ? entries
               .map(([name, p]) => `- **${name}**${name === projects.default ? " (default)" : ""} — ${p.description ?? p.path}`)
-              .join("\n")
+              .join("\n") +
+            "\n- **none** — no project; general chat mode (good for offtopic channels)"
           : "No projects configured. The host adds them in `projects.json`.";
         return void (await interaction.reply({ content: body, flags: MessageFlags.Ephemeral }));
       }
@@ -263,19 +322,47 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         return void (await interaction.reply({ content: "Channel project default cleared.", flags: MessageFlags.Ephemeral }));
       }
       const name = interaction.options.getString("name", true);
-      if (!projects.projects[name]) {
+      if (name !== "none" && !projects.projects[name]) {
         return void (await interaction.reply({
-          content: `Unknown project \`${name}\`. See **/project list**.`,
+          content: `Unknown project \`${name}\`. See **/project list** (tip: \`none\` = general chat mode).`,
           flags: MessageFlags.Ephemeral,
         }));
       }
       setChannelProject(interaction.channelId, name);
-      return void (await interaction.reply(`This channel now defaults to project **${name}**.`));
+      return void (await interaction.reply(
+        name === "none"
+          ? "This channel is now **project-free** — Claude acts as a general assistant here, no codebase assumed."
+          : `This channel now defaults to project **${name}**.`,
+      ));
     }
 
     case "reset": {
       clearSessions(interaction.channelId);
       return void (await interaction.reply("Fresh start — Claude's conversation memory for this channel is cleared."));
+    }
+
+    case "remember": {
+      const note = interaction.options.getString("note", true).replace(/\s+/g, " ").trim();
+      if (!note) {
+        return void (await interaction.reply({ content: "Empty note — nothing stored.", flags: MessageFlags.Ephemeral }));
+      }
+      addUserNote(interaction.user.id, note);
+      const notes = getUserNotes(interaction.user.id);
+      return void (await interaction.reply({
+        content:
+          `Noted. I now remember ${notes.length}/10 things about you:\n` +
+          notes.map((n) => `- ${n}`).join("\n") +
+          "\n-# these apply to your future questions everywhere on the server · /forget wipes them",
+        flags: MessageFlags.Ephemeral,
+      }));
+    }
+
+    case "forget": {
+      clearUserNotes(interaction.user.id);
+      return void (await interaction.reply({
+        content: "Wiped — the bot remembers nothing about you now.",
+        flags: MessageFlags.Ephemeral,
+      }));
     }
   }
 }
@@ -302,17 +389,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// @mention invocation: "@bot why is the build failing?" — includes channel history as context.
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !client.user || !message.mentions.has(client.user)) return;
-  if (message.mentions.everyone) return;
+// Peer-bot mention string -> display name, resolved at startup for the prompt note.
+let peerNote: string | undefined;
 
-  const question = message.content.replaceAll(`<@${client.user.id}>`, "").trim();
+// channelId -> consecutive bot-invoked answers; any human message resets it.
+const botChain = new Map<string, number>();
+
+// @mention invocation: "@bot why is the build failing?" — includes channel history as context.
+// Allowlisted peer bots may also invoke (bot-to-bot discussions), bounded by maxBotChain.
+client.on(Events.MessageCreate, async (message) => {
+  if (!client.user || message.author.id === client.user.id) return;
+  if (!message.author.bot) botChain.set(message.channelId, 0);
+
+  const isPeerBot = message.author.bot && config.peerBots.includes(message.author.id);
+  if (message.author.bot && !isPeerBot) return;
+  // Raw-content check as well: mentions suppressed via allowedMentions may not
+  // populate message.mentions, and peer bots ping each other with suppressed mentions.
+  const mentioned =
+    message.mentions.has(client.user) ||
+    message.content.includes(`<@${client.user.id}>`) ||
+    message.content.includes(`<@!${client.user.id}>`);
+  if (!mentioned || message.mentions.everyone) return;
+
+  if (isPeerBot) {
+    const chain = (botChain.get(message.channelId) ?? 0) + 1;
+    botChain.set(message.channelId, chain);
+    if (chain > config.maxBotChain) {
+      if (chain === config.maxBotChain + 1) {
+        await message
+          .reply({ content: "-# bot-to-bot chain limit reached — a human needs to say something to continue 🤖✋", allowedMentions: { parse: [] } })
+          .catch(() => {});
+      }
+      return;
+    }
+  }
+
+  const question = message.content
+    .replaceAll(`<@${client.user.id}>`, "")
+    .replaceAll(`<@!${client.user.id}>`, "")
+    .trim();
   if (!question) return;
 
   try {
     if ("sendTyping" in message.channel) await message.channel.sendTyping();
-    const history = await fetchHistory(message, message.channelId);
+    const replyContext = await getReplyContext(message);
+    const history = await fetchHistory(message, message.channelId, replyContext?.ids);
     const outcome = await enqueue(message.channelId, () =>
       ask({
         userId: message.author.id,
@@ -320,19 +441,37 @@ client.on(Events.MessageCreate, async (message) => {
         channelId: message.channelId,
         question,
         history: history.slice(0, -1), // drop the invoking message itself
+        replyContext: replyContext && { target: replyContext.target, around: replyContext.around },
+        isPublicChannel: isPublicChannel(message.channel),
+        peerNote,
       }),
     );
     const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
     const chunks = chunkMessage(outcome.text + suffix);
-    let last = await message.reply({ content: chunks[0] ?? "(empty response)", allowedMentions: { repliedUser: true, parse: [] } });
-    for (const chunk of chunks.slice(1)) last = await last.reply({ content: chunk, allowedMentions: { parse: [] } });
+    // Suppress all pings except allowlisted peer bots, so bot-to-bot mentions actually deliver.
+    const mentionPolicy = { parse: [] as never[], users: config.peerBots };
+    let last = await message.reply({ content: chunks[0] ?? "(empty response)", allowedMentions: { ...mentionPolicy, repliedUser: true } });
+    for (const chunk of chunks.slice(1)) last = await last.reply({ content: chunk, allowedMentions: mentionPolicy });
   } catch (err) {
     console.error("Mention handling failed:", err);
     await message.reply("Something broke handling that — check the bot logs.").catch(() => {});
   }
 });
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
+  if (config.peerBots.length) {
+    const entries: string[] = [];
+    for (const id of config.peerBots) {
+      const name = await c.users.fetch(id).then((u) => u.displayName).catch(() => "unknown bot");
+      entries.push(`<@${id}> (${name})`);
+    }
+    peerNote =
+      `Other AI bots live on this server: ${entries.join(", ")}. When someone asks you to discuss with one, ` +
+      `or one of them addresses you, you may talk to it: include its mention (e.g. ${entries[0]?.split(" ")[0]}) ` +
+      `literally in your reply to hand it the floor. Keep bot-to-bot replies SHORT and substantive; ` +
+      `don't mention a bot unless a discussion with it is actually wanted.`;
+    console.log(`Peer bots configured: ${entries.join(", ")}`);
+  }
   console.log(`Logged in as ${c.user.tag}. Invite URL:`);
   console.log(
     `https://discord.com/oauth2/authorize?client_id=${config.clientId}&scope=bot%20applications.commands&permissions=274877975552`,

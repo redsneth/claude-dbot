@@ -30,6 +30,13 @@ export const config = {
     .split(",")
     .map((s) => s.trim())
     .filter((s): s is "user" | "project" | "local" => ["user", "project", "local"].includes(s)),
+  /** Discord user IDs of other bots this bot will listen and reply to (bot-to-bot discussions). */
+  peerBots: (process.env.DBOT_PEER_BOTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  /** Max consecutive bot-invoked answers per channel before a human has to chime in. */
+  maxBotChain: Number(process.env.DBOT_MAX_BOT_CHAIN ?? 4),
 };
 
 mkdirSync(config.dataDir, { recursive: true });
@@ -42,6 +49,17 @@ export interface ProjectDef {
 export interface ProjectsConfig {
   default?: string;
   projects: Record<string, ProjectDef>;
+}
+
+/**
+ * Host-editable personality file. Re-read on every ask, so edits apply
+ * without a restart. Absent/empty file -> built-in default persona.
+ */
+export function loadPersona(): string | undefined {
+  const file = resolve("./persona.md");
+  if (!existsSync(file)) return undefined;
+  const text = readFileSync(file, "utf8").trim();
+  return text.length > 0 ? text : undefined;
 }
 
 export function loadProjects(): ProjectsConfig {

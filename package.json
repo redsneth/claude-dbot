@@ -12,6 +12,7 @@
     "start": "tsx src/index.ts",
     "register-commands": "tsx src/registerCommands.ts",
     "typecheck": "tsc --noEmit",
+    "fetch-skills": "sh scripts/fetch-skills.sh",
     "smoke": "DBOT_DATA_DIR=/tmp/dbot-smoke DISCORD_TOKEN=x DISCORD_CLIENT_ID=x tsx scripts/smoke.ts"
   },
   "dependencies": {

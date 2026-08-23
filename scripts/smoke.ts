@@ -22,6 +22,15 @@ assert.equal(own[0]!.ownerId, "alice");
 assert.ok(own[0]!.isOwn);
 assert.deepEqual(own.slice(1).map((x) => x.ownerId), ["bob"]);
 
+// public-only share: bob restricts to public channels
+db.addShare("bob", "*", true);
+assert.deepEqual(candidatesFor("dave", undefined, false).map((x) => x.ownerId), ["carol"]);
+assert.deepEqual(new Set(candidatesFor("dave", undefined, true).map((x) => x.ownerId)), new Set(["bob", "carol"]));
+// re-sharing without the flag clears it
+db.addShare("bob", "*", false);
+assert.ok(candidatesFor("dave", undefined, false).some((x) => x.ownerId === "bob"));
+assert.ok(db.listSharesByOwner("bob").every((s) => !s.publicOnly));
+
 db.setCooldown("bob", Date.now() + 3600e3, "rate limit");
 assert.deepEqual(candidatesFor("alice").map((x) => x.ownerId), ["alice"]);
 assert.ok(earliestReset("dave")! > Date.now());
@@ -31,7 +40,7 @@ assert.ok(candidatesFor("dave").some((x) => x.ownerId === "carol"));
 
 db.deleteToken("bob");
 assert.ok(!db.hasToken("bob"));
-assert.deepEqual(db.donorsFor("dave"), ["carol"]);
+assert.deepEqual(db.donorsFor("dave", true), ["carol"]);
 
 db.setSession("chan1", "xyz", "sess-1");
 assert.equal(db.getSession("chan1", "xyz"), "sess-1");
@@ -65,6 +74,15 @@ assert.equal(sum.inputTokens, 6300);
 assert.ok(Math.abs(sum.costUsd - 0.96) < 1e-9);
 assert.equal(sum.byRequester[0]!.requesterId, "dave");
 assert.equal(sum.byModel[0]!.model, "fable");
+
+// user notes: append, cap at 10, clear
+for (let i = 1; i <= 12; i++) db.addUserNote("dave", `note ${i}`);
+const daveNotes = db.getUserNotes("dave");
+assert.equal(daveNotes.length, 10);
+assert.equal(daveNotes[0], "note 3"); // oldest two rolled off
+assert.equal(daveNotes[9], "note 12");
+db.clearUserNotes("dave");
+assert.equal(db.getUserNotes("dave").length, 0);
 
 // utilization snapshot
 db.setTokenStatus("carol", 42.5, "five_hour");
