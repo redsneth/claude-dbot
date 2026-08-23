@@ -41,6 +41,8 @@ import * as wizard from "./wizard.js";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  // Default for every send: ping nobody except allowlisted peer bots (and reply targets).
+  allowedMentions: { parse: [], users: config.peerBots, repliedUser: true },
 });
 
 const HISTORY_LIMIT = 30;
@@ -124,7 +126,7 @@ async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void
   );
 
   const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
-  const chunks = chunkMessage(`**Q (${askerName}):** ${question}\n\n${outcome.text}${suffix}`);
+  const chunks = chunkMessage(`**Q (${askerName}):** ${question}\n\n${linkifyPeers(outcome.text)}${suffix}`);
   await interaction.editReply(chunks[0] ?? "(empty response)");
   for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
 }
@@ -391,6 +393,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // Peer-bot mention string -> display name, resolved at startup for the prompt note.
 let peerNote: string | undefined;
+const peerNames = new Map<string, string>(); // id -> display name
+
+/**
+ * The model sees mentions as readable "@Name" text (cleanContent) and mimics that
+ * form back regardless of instructions — which Discord renders as dead text. So we
+ * linkify: any "@PeerName" in an outgoing answer becomes a real <@id> mention.
+ */
+function linkifyPeers(text: string): string {
+  let out = text;
+  for (const [id, name] of peerNames) {
+    const pattern = new RegExp(`@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+    out = out.replace(pattern, `<@${id}>`);
+  }
+  return out;
+}
 
 // channelId -> consecutive bot-invoked answers; any human message resets it.
 const botChain = new Map<string, number>();
@@ -447,7 +464,7 @@ client.on(Events.MessageCreate, async (message) => {
       }),
     );
     const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
-    const chunks = chunkMessage(outcome.text + suffix);
+    const chunks = chunkMessage(linkifyPeers(outcome.text) + suffix);
     // Suppress all pings except allowlisted peer bots, so bot-to-bot mentions actually deliver.
     const mentionPolicy = { parse: [] as never[], users: config.peerBots };
     let last = await message.reply({ content: chunks[0] ?? "(empty response)", allowedMentions: { ...mentionPolicy, repliedUser: true } });
@@ -463,6 +480,7 @@ client.once(Events.ClientReady, async (c) => {
     const entries: string[] = [];
     for (const id of config.peerBots) {
       const name = await c.users.fetch(id).then((u) => u.displayName).catch(() => "unknown bot");
+      peerNames.set(id, name);
       entries.push(`<@${id}> (${name})`);
     }
     peerNote =
