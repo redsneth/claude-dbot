@@ -13,7 +13,9 @@ Built on [discord.js](https://discord.js.org) and the
 - **`/ask`** or **@mention the bot** — ask Claude; mentions include recent channel history as context,
   and @mentioning **as a reply** pulls in the replied-to message ±5 surrounding messages, so
   "why is he wrong?" knows exactly which message "he" and "wrong" refer to.
-  `/ask` takes an optional `model` (Haiku/Sonnet/Opus/Fable); the host sets the default via `DBOT_DEFAULT_MODEL`
+  `/ask` options: `model` (Haiku/Sonnet/Opus/Fable; host default via `DBOT_DEFAULT_MODEL`), `project`,
+  and `sub` — whose subscription pays: `auto` (yours first, donated fallback), `mine` (only your own),
+  or `donated` (spare your own quota)
 - **`/setup`** — guided onboarding in your DMs: one message walks you through token → sharing →
   model cap with buttons and dropdowns, ending in a summary
 - **`/register`** — the quick path: paste your token from `claude setup-token` into a private modal
@@ -26,7 +28,9 @@ Built on [discord.js](https://discord.js.org) and the
   your own asks are never capped). The router skips your sub when someone requests a bigger model
 - **`/usage`** — donor report: runs, tokens, API-equivalent cost of what this bot consumed from
   your sub, broken down by user and model, plus the live rate-limit-window utilization %
-- **`/project`** — point a channel at a repo checkout (from `projects.json`) so Claude can read the code
+- **`/project`** — point a channel at a repo checkout (from `projects.json`) so Claude can read the
+  code, or `/project set none` for general-chat mode (no codebase assumed — good for offtopic channels;
+  channels with no setting and no global default are general-chat too)
 - **`/reset`** — clear a channel's Claude conversation memory
 - **`/remember` / `/forget`** — teach the bot facts about yourself (preferred name, what you work
   on; max 10 notes, self-reported only) that flavor its answers to you everywhere
