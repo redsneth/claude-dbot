@@ -68,14 +68,18 @@ function formatMsg(m: Message): string {
   return `${m.member?.displayName ?? m.author.displayName ?? m.author.username}: ${m.cleanContent}`;
 }
 
-async function fetchHistory(message: Message | null, channelId: string, excludeIds?: Set<string>): Promise<string[]> {
+async function fetchHistory(
+  message: Message | null,
+  channelId: string,
+  excludeIds?: Set<string>,
+): Promise<{ ts: number; line: string }[]> {
   const channel = message?.channel ?? (await client.channels.fetch(channelId));
   if (!channel || !("messages" in channel)) return [];
   const fetched = await channel.messages.fetch({ limit: HISTORY_LIMIT });
   return [...fetched.values()]
     .reverse()
     .filter((m) => m.content.trim().length > 0 && !excludeIds?.has(m.id))
-    .map(formatMsg);
+    .map((m) => ({ ts: m.createdTimestamp, line: formatMsg(m) }));
 }
 
 /**
@@ -111,17 +115,19 @@ async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void
       : interaction.user.username;
 
   await interaction.deferReply();
+  const history = await fetchHistory(null, interaction.channelId).catch(() => []);
   const outcome = await enqueue(interaction.channelId, () =>
     ask({
       userId: interaction.user.id,
       userName: askerName,
       channelId: interaction.channelId,
       question,
-      history: [],
+      history,
       project,
       model,
       sub,
       isPublicChannel: isPublicChannel(interaction.channel),
+      peerNote,
     }),
   );
 

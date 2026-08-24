@@ -21,8 +21,8 @@ export interface AskRequest {
   userName: string;
   channelId: string;
   question: string;
-  /** Recent channel messages, oldest first, already formatted as "Author: text" lines. */
-  history: string[];
+  /** Recent channel messages, oldest first: send timestamp + formatted "Author: text" line. */
+  history: { ts: number; line: string }[];
   /** When the invocation was a Discord reply: the replied-to message and its surroundings. */
   replyContext?: { target: string; around: string[] };
   /** Explicit project override (else channel default, else global default). */
@@ -107,13 +107,18 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
   }
 
   const { name: project, cwd, hasProject } = resolveProject(req.channelId, req.project);
-  const existingSession = getSession(req.channelId, project);
+  const session = getSession(req.channelId, project);
+  const existingSession = session?.sessionId;
 
-  // When resuming, the session already has the conversation; only new context is needed.
-  const historyBlock =
-    !existingSession && req.history.length
-      ? `Recent channel messages for context:\n<discord_history>\n${req.history.join("\n")}\n</discord_history>\n\n`
-      : "";
+  // The session already has whatever the bot saw during its own invocations; on resume,
+  // include only channel messages newer than its last reply so nothing said in between is lost.
+  const visibleHistory = existingSession
+    ? req.history.filter((h) => h.ts > session.updatedAt)
+    : req.history;
+  const historyBlock = visibleHistory.length
+    ? `${existingSession ? "Channel messages since your last reply" : "Recent channel messages for context"}:\n` +
+      `<discord_history>\n${visibleHistory.map((h) => h.line).join("\n")}\n</discord_history>\n\n`
+    : "";
   const notes = getUserNotes(req.userId);
   const notesBlock = notes.length
     ? `Self-reported facts about ${req.userName} (they entered these via /remember):\n${notes.map((n) => `- ${n}`).join("\n")}\n\n`

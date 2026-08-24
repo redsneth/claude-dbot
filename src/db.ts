@@ -279,11 +279,14 @@ export function getCooldown(ownerId: string): { until: number; reason: string | 
 
 // --- sessions ---
 
-export function getSession(channelId: string, project: string): string | undefined {
+export function getSession(
+  channelId: string,
+  project: string,
+): { sessionId: string; updatedAt: number } | undefined {
   const row = db
-    .prepare(`SELECT session_id FROM sessions WHERE channel_id = ? AND project = ?`)
-    .get(channelId, project) as { session_id: string } | undefined;
-  return row?.session_id;
+    .prepare(`SELECT session_id, updated_at FROM sessions WHERE channel_id = ? AND project = ?`)
+    .get(channelId, project) as { session_id: string; updated_at: number } | undefined;
+  return row ? { sessionId: row.session_id, updatedAt: row.updated_at } : undefined;
 }
 
 export function setSession(channelId: string, project: string, sessionId: string): void {
