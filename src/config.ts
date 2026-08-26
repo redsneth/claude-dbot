@@ -37,6 +37,12 @@ export const config = {
     .filter(Boolean),
   /** Max consecutive bot-invoked answers per channel before a human has to chime in. */
   maxBotChain: Number(process.env.DBOT_MAX_BOT_CHAIN ?? 4),
+  /** Bot mode for channels with no explicit /botmode setting: off | chat | thread | free. */
+  defaultBotMode: process.env.DBOT_DEFAULT_BOTMODE ?? "free",
+  /** Ratio governor: look at the last N channel messages... */
+  ratioWindow: Number(process.env.DBOT_RATIO_WINDOW ?? 10),
+  /** ...and if more than this many are bot-authored, divert the answer to a thread. */
+  ratioMaxBot: Number(process.env.DBOT_RATIO_MAX_BOT ?? 6),
 };
 
 mkdirSync(config.dataDir, { recursive: true });

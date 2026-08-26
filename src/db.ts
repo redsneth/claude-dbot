@@ -36,6 +36,11 @@ db.exec(`
     channel_id TEXT PRIMARY KEY,
     project    TEXT NOT NULL
   );
+  -- Per-channel bot behavior: off | chat | thread | free (see /botmode)
+  CREATE TABLE IF NOT EXISTS channel_modes (
+    channel_id TEXT PRIMARY KEY,
+    mode       TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS usage_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,
@@ -318,4 +323,20 @@ export function setChannelProject(channelId: string, project: string): void {
 
 export function clearChannelProject(channelId: string): void {
   db.prepare(`DELETE FROM channel_projects WHERE channel_id = ?`).run(channelId);
+}
+
+// --- channel bot modes ---
+
+export function getChannelMode(channelId: string): string | undefined {
+  const row = db.prepare(`SELECT mode FROM channel_modes WHERE channel_id = ?`).get(channelId) as
+    | { mode: string }
+    | undefined;
+  return row?.mode;
+}
+
+export function setChannelMode(channelId: string, mode: string): void {
+  db.prepare(
+    `INSERT INTO channel_modes (channel_id, mode) VALUES (?, ?)
+     ON CONFLICT(channel_id) DO UPDATE SET mode = excluded.mode`,
+  ).run(channelId, mode);
 }

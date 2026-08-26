@@ -35,6 +35,8 @@ export interface AskRequest {
   isPublicChannel?: boolean;
   /** Standing note about allowlisted peer bots and how to address them. */
   peerNote?: string;
+  /** Channel-mode style directive (e.g. chat mode's brevity rules), injected per question. */
+  styleNote?: string;
 }
 
 export interface AskOutcome {
@@ -133,7 +135,8 @@ export async function ask(req: AskRequest): Promise<AskOutcome> {
       `\n`
     : "";
   const peerBlock = req.peerNote ? `${req.peerNote}\n\n` : "";
-  const prompt = `${historyBlock}${replyBlock}${peerBlock}${notesBlock}${req.userName} asks: ${req.question}`;
+  const styleBlock = req.styleNote ? `${req.styleNote}\n\n` : "";
+  const prompt = `${historyBlock}${replyBlock}${peerBlock}${notesBlock}${styleBlock}${req.userName} asks: ${req.question}`;
 
   const failures: string[] = [];
   for (const candidate of candidates) {

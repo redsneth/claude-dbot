@@ -1,4 +1,4 @@
-import { SlashCommandBuilder } from "discord.js";
+import { PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
 
 export const commandDefinitions = [
   new SlashCommandBuilder()
@@ -105,4 +105,21 @@ export const commandDefinitions = [
     ),
 
   new SlashCommandBuilder().setName("forget").setDescription("Delete everything the bot remembers about you"),
+
+  new SlashCommandBuilder()
+    .setName("botmode")
+    .setDescription("Set how the bot behaves in this channel (requires Manage Channels)")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .addStringOption((o) =>
+      o
+        .setName("mode")
+        .setDescription("Behavior for this channel")
+        .setRequired(true)
+        .addChoices(
+          { name: "off — bot never responds here", value: "off" },
+          { name: "chat — short plain-prose answers only", value: "chat" },
+          { name: "thread — long answers go into threads", value: "thread" },
+          { name: "free — full answers inline (default)", value: "free" },
+        ),
+    ),
 ].map((c) => c.toJSON());

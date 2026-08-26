@@ -40,9 +40,17 @@ Built on [discord.js](https://discord.js.org) and the
   prompt of every answer (guaranteed to apply, unlike opt-in Claude Code skills), whatever the
   project, hot-reloaded per question. Unlicensed third-party skills (e.g. cursor/plugins'
   `unslop`) aren't vendored — run `npm run fetch-skills` once per host to download them
+- **`/botmode`** (Manage Channels) — per-channel behavior: `off` (never responds), `chat` (short
+  plain-prose answers only), `thread` (answers longer than ~500 chars go into a thread off the
+  invoking message; channel keeps a one-line teaser for `/ask`), `free` (full answers inline;
+  the default, tunable via `DBOT_DEFAULT_BOTMODE`). Threads inherit their parent's mode
+- **Ratio governor** — if bots authored more than 6 of the last 10 channel messages
+  (`DBOT_RATIO_WINDOW`/`DBOT_RATIO_MAX_BOT`), answers auto-divert to a thread so bots yield the
+  floor when they're dominating a channel
 - **Bot-to-bot discussions** — allowlist other bots via `DBOT_PEER_BOTS` (comma-separated user IDs,
   set on both sides) and they can @mention each other into a conversation; a per-channel chain cap
-  (`DBOT_MAX_BOT_CHAIN`, default 4) stops runaway loops until a human speaks again. Note: a peer
+  (`DBOT_MAX_BOT_CHAIN`, default 4) stops runaway loops until a human speaks again, and the chain
+  moves into a thread after the first exchange so debates don't flood the channel. Note: a peer
   bot has no token of its own, so its questions ride subs shared with *everyone*
 - Per-channel resumable sessions, automatic rate-limit failover with reset-time cooldowns,
   answers chunked to Discord's 2000-char limit with code fences preserved

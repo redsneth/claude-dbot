@@ -43,7 +43,9 @@ assert.ok(!db.hasToken("bob"));
 assert.deepEqual(db.donorsFor("dave", true), ["carol"]);
 
 db.setSession("chan1", "xyz", "sess-1");
-assert.equal(db.getSession("chan1", "xyz"), "sess-1");
+const sess = db.getSession("chan1", "xyz");
+assert.equal(sess?.sessionId, "sess-1");
+assert.ok(typeof sess?.updatedAt === "number" && sess.updatedAt > 0);
 db.clearSessions("chan1");
 assert.equal(db.getSession("chan1", "xyz"), undefined);
 
@@ -74,6 +76,13 @@ assert.equal(sum.inputTokens, 6300);
 assert.ok(Math.abs(sum.costUsd - 0.96) < 1e-9);
 assert.equal(sum.byRequester[0]!.requesterId, "dave");
 assert.equal(sum.byModel[0]!.model, "fable");
+
+// channel bot modes
+assert.equal(db.getChannelMode("chan-x"), undefined);
+db.setChannelMode("chan-x", "thread");
+assert.equal(db.getChannelMode("chan-x"), "thread");
+db.setChannelMode("chan-x", "off");
+assert.equal(db.getChannelMode("chan-x"), "off");
 
 // user notes: append, cap at 10, clear
 for (let i = 1; i <= 12; i++) db.addUserNote("dave", `note ${i}`);

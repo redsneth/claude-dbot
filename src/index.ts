@@ -23,9 +23,11 @@ import {
   clearUserNotes,
   deleteToken,
   getUserNotes,
+  getChannelMode,
   getChannelProject,
   getCooldown,
   getMaxTier,
+  setChannelMode,
   getTokenStatus,
   hasToken,
   listSharesByOwner,
@@ -46,6 +48,63 @@ const client = new Client({
 });
 
 const HISTORY_LIMIT = 30;
+
+// --- channel bot modes & answer placement ---
+
+type BotMode = "off" | "chat" | "thread" | "free";
+const BOT_MODES: BotMode[] = ["off", "chat", "thread", "free"];
+
+const CHAT_STYLE_NOTE =
+  "MODE NOTE — this is a casual chat channel: reply in 1-4 sentences of plain prose, hard max ~600 characters. " +
+  "No bullet lists, no headers, no code blocks unless the question is literally about code.";
+
+/** Resolve a channel's bot mode; threads inherit from their parent channel. */
+function botModeFor(channel: unknown): BotMode {
+  const ch = channel as { id?: string; isThread?: () => boolean; parentId?: string | null } | null;
+  const lookupId = ch && typeof ch.isThread === "function" && ch.isThread() ? (ch.parentId ?? ch.id) : ch?.id;
+  const stored = lookupId ? getChannelMode(lookupId) : undefined;
+  const mode = stored ?? config.defaultBotMode;
+  return (BOT_MODES as string[]).includes(mode) ? (mode as BotMode) : "free";
+}
+
+/** Ratio governor: true when bots wrote more than the allowed share of recent messages. */
+function botRatioBreached(history: { isBot: boolean }[]): boolean {
+  const window = history.slice(-config.ratioWindow);
+  return window.filter((h) => h.isBot).length > config.ratioMaxBot;
+}
+
+/** Length above which a `thread`-mode answer moves out of the channel. */
+const THREAD_INLINE_LIMIT = 500;
+
+function threadNameFor(question: string): string {
+  const base = question.replace(/\s+/g, " ").trim().slice(0, 80);
+  return `🤖 ${base || "claude"}`;
+}
+
+/**
+ * Post answer chunks into a thread hanging off `anchor` (creating it if needed).
+ * Returns false if threads aren't possible here so the caller can fall back inline.
+ */
+async function postInThread(
+  anchor: Message,
+  name: string,
+  chunks: string[],
+): Promise<boolean> {
+  try {
+    const anchorMsg = anchor as Message & { thread?: { send: (o: unknown) => Promise<unknown> } | null };
+    const thread =
+      anchorMsg.thread ??
+      (await (anchor as Message & { startThread: (o: { name: string; autoArchiveDuration: number }) => Promise<{ send: (o: unknown) => Promise<unknown> }> }).startThread({
+        name,
+        autoArchiveDuration: 1440,
+      }));
+    for (const chunk of chunks) await thread.send({ content: chunk });
+    return true;
+  } catch (err) {
+    console.error("Could not create/post thread, falling back inline:", err);
+    return false;
+  }
+}
 
 /**
  * A channel counts as "public" when the @everyone role can view it (threads
@@ -72,14 +131,14 @@ async function fetchHistory(
   message: Message | null,
   channelId: string,
   excludeIds?: Set<string>,
-): Promise<{ ts: number; line: string }[]> {
+): Promise<{ ts: number; line: string; isBot: boolean }[]> {
   const channel = message?.channel ?? (await client.channels.fetch(channelId));
   if (!channel || !("messages" in channel)) return [];
   const fetched = await channel.messages.fetch({ limit: HISTORY_LIMIT });
   return [...fetched.values()]
     .reverse()
     .filter((m) => m.content.trim().length > 0 && !excludeIds?.has(m.id))
-    .map((m) => ({ ts: m.createdTimestamp, line: formatMsg(m) }));
+    .map((m) => ({ ts: m.createdTimestamp, line: formatMsg(m), isBot: m.author.bot }));
 }
 
 /**
@@ -114,6 +173,17 @@ async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void
       ? interaction.member.displayName
       : interaction.user.username;
 
+  const mode = botModeFor(interaction.channel);
+  if (mode === "off") {
+    await interaction.reply({
+      content: "The bot is switched off in this channel (`/botmode`). Try a bot-enabled channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const inThread =
+    !!interaction.channel && typeof interaction.channel.isThread === "function" && interaction.channel.isThread();
+
   await interaction.deferReply();
   const history = await fetchHistory(null, interaction.channelId).catch(() => []);
   const outcome = await enqueue(interaction.channelId, () =>
@@ -128,11 +198,31 @@ async function handleAsk(interaction: ChatInputCommandInteraction): Promise<void
       sub,
       isPublicChannel: isPublicChannel(interaction.channel),
       peerNote,
+      styleNote: mode === "chat" ? CHAT_STYLE_NOTE : undefined,
     }),
   );
 
   const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
-  const chunks = chunkMessage(`**Q (${askerName}):** ${question}\n\n${linkifyPeers(outcome.text)}${suffix}`);
+  const text = linkifyPeers(outcome.text);
+
+  const shouldThread =
+    !inThread &&
+    outcome.ok &&
+    (botRatioBreached(history) ||
+      (mode === "thread" && text.length > THREAD_INLINE_LIMIT) ||
+      (mode === "chat" && text.length > 900));
+
+  if (shouldThread) {
+    const teaser = text.split("\n").find((l) => l.trim()) ?? "";
+    await interaction.editReply(
+      `**Q (${askerName}):** ${question}\n\n${teaser.slice(0, 200)}${teaser.length > 200 ? "…" : ""} 🧵${suffix}`,
+    );
+    const anchor = await interaction.fetchReply();
+    if (await postInThread(anchor, threadNameFor(question), chunkMessage(text))) return;
+    // Thread creation failed — fall through and post the rest inline instead.
+  }
+
+  const chunks = chunkMessage(`**Q (${askerName}):** ${question}\n\n${text}${suffix}`);
   await interaction.editReply(chunks[0] ?? "(empty response)");
   for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
 }
@@ -258,6 +348,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       );
       const project = getChannelProject(interaction.channelId) ?? loadProjects().default ?? "none";
       lines.push(`This channel's project: **${project === "none" ? "none (general chat)" : project}**`);
+      lines.push(`This channel's bot mode: **${botModeFor(interaction.channel)}**`);
       const noteCount = getUserNotes(uid).length;
       if (noteCount) lines.push(`The bot remembers ${noteCount} thing${noteCount === 1 ? "" : "s"} about you (/remember to review, /forget to wipe)`);
       return void (await interaction.reply({ content: lines.join("\n"), flags: MessageFlags.Ephemeral }));
@@ -372,6 +463,18 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         flags: MessageFlags.Ephemeral,
       }));
     }
+
+    case "botmode": {
+      const mode = interaction.options.getString("mode", true);
+      setChannelMode(interaction.channelId, mode);
+      const blurb: Record<string, string> = {
+        off: "the bot will **not respond** in this channel.",
+        chat: "**chat mode** — short plain-prose answers only, no essays.",
+        thread: "**thread mode** — anything longer than a quick answer goes into a thread.",
+        free: "**free mode** — full answers inline.",
+      };
+      return void (await interaction.reply(`Bot mode set: ${blurb[mode] ?? mode}`));
+    }
   }
 }
 
@@ -453,6 +556,10 @@ client.on(Events.MessageCreate, async (message) => {
     .trim();
   if (!question) return;
 
+  const mode = botModeFor(message.channel);
+  if (mode === "off") return;
+  const inThread = typeof message.channel.isThread === "function" && message.channel.isThread();
+
   try {
     if ("sendTyping" in message.channel) await message.channel.sendTyping();
     const replyContext = await getReplyContext(message);
@@ -467,11 +574,27 @@ client.on(Events.MessageCreate, async (message) => {
         replyContext: replyContext && { target: replyContext.target, around: replyContext.around },
         isPublicChannel: isPublicChannel(message.channel),
         peerNote,
+        styleNote: mode === "chat" ? CHAT_STYLE_NOTE : undefined,
       }),
     );
     const suffix = outcome.viaDonor ? `\n-# answered via <@${outcome.viaDonor}>'s subscription` : "";
-    const chunks = chunkMessage(linkifyPeers(outcome.text) + suffix);
-    // Suppress all pings except allowlisted peer bots, so bot-to-bot mentions actually deliver.
+    const text = linkifyPeers(outcome.text);
+    const chunks = chunkMessage(text + suffix);
+
+    // Placement: threads are already contained; otherwise divert to a thread when the
+    // ratio governor trips, when a bot-to-bot chain is past its first exchange, or when
+    // a thread-mode answer outgrows the inline limit.
+    const chainDivert = isPeerBot && (botChain.get(message.channelId) ?? 0) >= 2;
+    const shouldThread =
+      !inThread &&
+      outcome.ok &&
+      (chainDivert ||
+        botRatioBreached(history) ||
+        (mode === "thread" && text.length > THREAD_INLINE_LIMIT) ||
+        (mode === "chat" && text.length > 900));
+
+    if (shouldThread && (await postInThread(message, threadNameFor(question), chunks))) return;
+
     const mentionPolicy = { parse: [] as never[], users: config.peerBots };
     let last = await message.reply({ content: chunks[0] ?? "(empty response)", allowedMentions: { ...mentionPolicy, repliedUser: true } });
     for (const chunk of chunks.slice(1)) last = await last.reply({ content: chunk, allowedMentions: mentionPolicy });
